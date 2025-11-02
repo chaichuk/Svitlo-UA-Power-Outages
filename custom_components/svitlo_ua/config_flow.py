@@ -1,105 +1,76 @@
-"""Config flow for Svitlo UA Power Outages integration."""
-from typing import Optional
+"""Конфігураційний потік (UI) для інтеграції 'Світло'."""
+import logging
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.core import callback
+from homeassistant.core import HomeAssistant
+from homeassistant.data_entry_flow import FlowResult
 
-from .const import DOMAIN, REGIONS, REGION_PROVIDERS
+from . import const
 
-class SvitloUAConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for Svitlo UA integration."""
+_LOGGER = logging.getLogger(__name__)
+
+class SvitloConfigFlow(config_entries.ConfigFlow, domain=const.DOMAIN):
+    """Клас налаштування інтеграції через UI."""
     VERSION = 1
 
     def __init__(self):
-        self._selected_region: Optional[str] = None
+        self._region = None
+        self._provider = None
 
-    async def async_step_user(self, user_input=None):
-        """Step 1: Select region."""
+    async def async_step_user(self, user_input=None) -> FlowResult:
         errors = {}
         if user_input is not None:
-            self._selected_region = user_input["region"]
-            # Якщо для регіону потрібен вибір постачальника – переходимо на наступний крок
-            if REGION_PROVIDERS.get(self._selected_region):
+            self._region = user_input["region"]
+            # Перевірка: чи вже конфігуровано цей регіон+групу
+            existing = [entry for entry in self._async_current_entries() if entry.data.get("region") == self._region]
+            if existing:
+                return self.async_abort(reason="already_configured")
+            # якщо в обраному регіоні дві можливі компанії:
+            if self._region == "Київ":
                 return await self.async_step_provider()
             else:
-                # Якщо постачальника вибирати не потрібно, переходимо до вводу черги
                 return await self.async_step_group()
-        # Формуємо форму вибору регіону
-        regions_list = list(REGIONS)  # Список названь регіонів
-        schema = vol.Schema({
-            vol.Required("region"): vol.In(regions_list)
+        # Список можливих регіонів для вибору
+        regions = list(const.REGION_API_MAPPING.keys())
+        data_schema = vol.Schema({
+            vol.Required("region"): vol.In(regions)
         })
-        return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
+        return self.async_show_form(step_id="user", data_schema=data_schema, errors=errors)
 
-    async def async_step_provider(self, user_input=None):
-        """Step 2: Select provider if required for region."""
+    async def async_step_provider(self, user_input=None) -> FlowResult:
         errors = {}
         if user_input is not None:
-            # Зберігаємо вибраного постачальника і переходимо до вводу черги
-            self._selected_provider = user_input["provider"]
+            self._provider = user_input["provider"]
             return await self.async_step_group()
-        # Отримуємо список постачальників для вибраного регіону
-        providers = REGION_PROVIDERS.get(self._selected_region, [])
-        schema = vol.Schema({
-            vol.Required("provider"): vol.In(providers)
+        # Для Києва дві опції постачальника
+        options = ["Yasno (м.\u00a0Київ)", "ДТЕК Київські електромережі"]
+        data_schema = vol.Schema({
+            vol.Required("provider"): vol.In(options)
         })
-        return self.async_show_form(step_id="provider", data_schema=schema, errors=errors)
+        return self.async_show_form(step_id="provider", data_schema=data_schema, errors=errors)
 
-    async def async_step_group(self, user_input=None):
-        """Step 3: Enter or select outage group number."""
+    async def async_step_group(self, user_input=None) -> FlowResult:
         errors = {}
         if user_input is not None:
-            group_str = user_input["group"]
-            # Валідація формату групи (має бути напр. "1", "2.1", "6.2" тощо)
-            if not self._validate_group_format(group_str):
-                errors["base"] = "invalid_group"
-            else:
-                # Створюємо запис конфігурації з обраними параметрами
-                return self.async_create_entry(title=f"{self._selected_region} - {group_str}", data={
-                    "region": self._selected_region,
-                    "provider": getattr(self, "_selected_provider", None),
-                    "group": group_str
-                })
-        # Визначаємо приклад значення для підказки
-        example = "1 або 2.1 або 6.2"
-        schema = vol.Schema({
-            vol.Required("group"): str  # користувач може ввести номер черги (рядок)
+            group = user_input["group"]
+            # Перевірка на дублювання:
+            for entry in self._async_current_entries():
+                if entry.data.get("region") == self._region and entry.data.get("group") == group:
+                    return self.async_abort(reason="already_configured")
+            # Створити config entry
+            provider_code = None
+            if self._provider is not None:
+                if self._provider.startswith("Yasno"):
+                    provider_code = "yasno"
+                elif self._provider.startswith("ДТЕК"):
+                    provider_code = "dtek"
+            data = {"region": self._region, "provider": provider_code, "group": group}
+            return self.async_create_entry(title=f"Світло - {self._region} {group}", data=data)
+        # Отримання списку груп для регіону
+        # Наразі - 1.1-6.2 за замовчуванням
+        group_options = [f"{i}.{j}" for i in range(1, 7) for j in (1, 2)]
+        data_schema = vol.Schema({
+            vol.Required("group"): vol.In(group_options)
         })
-        return self.async_show_form(step_id="group", data_schema=schema, errors=errors, description_placeholders={"example": example})
-
-    @staticmethod
-    def _validate_group_format(group: str) -> bool:
-        """Перевірка, що група має формат числа або числа.числа."""
-        if not group:
-            return False
-        # Дозволені формати: "X", "X.Y" де X,Y - цифри
-        # Наприклад: "1", "2", "2.1", "10.2" тощо.
-        parts = group.split(".")
-        if len(parts) == 1:
-            return parts[0].isdigit()
-        elif len(parts) == 2:
-            return parts[0].isdigit() and parts[1].isdigit()
-        else:
-            return False
-
-    @staticmethod
-    @callback
-    def async_get_options_flow(config_entry):
-        """Дозволяє редагувати налаштування інтеграції (за потреби)."""
-        return SvitloUAOptionsFlow(config_entry)
-
-class SvitloUAOptionsFlow(config_entries.OptionsFlow):
-    """Опціональний flow для редагування конфігурації (необов'язково)."""
-    def __init__(self, config_entry):
-        self.config_entry = config_entry
-
-    async def async_step_init(self, user_input=None):
-        """Початковий крок опційного flow - дозволяємо змінити лише групу, наприклад."""
-        if user_input is not None:
-            # Оновлюємо лише номер групи
-            return self.async_create_entry(title="", data={"group": user_input["group"]})
-        schema = vol.Schema({
-            vol.Optional("group", default=self.config_entry.data.get("group", "")): str
-        })
-        return self.async_show_form(step_id="init", data_schema=schema)
+        return self.async_show_form(step_id="group", data_schema=data_schema, errors=errors)
