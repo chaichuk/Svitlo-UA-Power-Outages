@@ -19,7 +19,7 @@ class SvitloDataUpdateCoordinator(DataUpdateCoordinator):
         self.region = region
         self.provider = provider  # 'yasno', 'dtek', або None для однопровайдерних регіонів
         self.group = group  # напр. '1.2' чи '4.1'
-        super().__init__(hass, _name=__name__, update_interval=timedelta(minutes=5))
+        super().__init__(hass, name=__name__, update_interval=timedelta(minutes=5))
 
     async def _async_update_data(self):
         """Оновлення даних повнографіку відключень."""
