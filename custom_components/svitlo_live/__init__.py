@@ -1,55 +1,33 @@
 from __future__ import annotations
-from typing import Any
 from homeassistant.core import HomeAssistant
-from homeassistant.components.binary_sensor import (
-    BinarySensorEntity,
-    BinarySensorDeviceClass,
-)
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.const import Platform
+from .const import DOMAIN, PLATFORMS, CONF_REGION, CONF_QUEUE, CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL
+from .coordinator import SvitloCoordinator
 
-from .const import DOMAIN
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Підняти інтеграцію з ConfigEntry."""
+    hass.data.setdefault(DOMAIN, {})
 
-async def async_setup_entry(
-    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
-) -> None:
-    coordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([SvitloElectricityStatusBinary(coordinator)])
+    # Збираємо конфіг для координатора: region, queue, scan_interval
+    config = {
+        CONF_REGION: entry.data[CONF_REGION],
+        CONF_QUEUE: entry.data[CONF_QUEUE],
+        CONF_SCAN_INTERVAL: entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL),
+    }
 
-class SvitloBaseEntity(CoordinatorEntity):
-    @property
-    def device_info(self) -> dict[str, Any]:
-        region = getattr(self.coordinator, "region", "region")
-        queue = getattr(self.coordinator, "queue", "queue")
-        return {
-            "identifiers": {(DOMAIN, f"{region}_{queue}")},
-            "manufacturer": "svitlo.live",
-            "model": f"Queue {queue}",
-            "name": f"Svitlo • {region} / {queue}",
-        }
+    coordinator = SvitloCoordinator(hass, config)
+    await coordinator.async_config_entry_first_refresh()
 
-class SvitloElectricityStatusBinary(SvitloBaseEntity, BinarySensorEntity):
-    _attr_name = "Electricity status"
-    _attr_device_class = BinarySensorDeviceClass.POWER
+    hass.data[DOMAIN][entry.entry_id] = coordinator
 
-    def __init__(self, coordinator) -> None:
-        super().__init__(coordinator)
-        self._attr_unique_id = f"svitlo_power_{coordinator.region}_{coordinator.queue}"
+    # Форвардимо налаштування платформ
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    return True
 
-    @property
-    def is_on(self) -> bool | None:
-        # ON/OFF логіка: on/maybe -> ON; off/unknown -> OFF
-        val = self.coordinator.data.get("now_status")
-        if val in ("on", "maybe"):
-            return True
-        if val in ("off", "unknown"):
-            return False
-        return None
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        return {
-            "next_change_at": self.coordinator.data.get("next_change_at"),
-            "queue": self.coordinator.data.get("queue"),
-        }
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Вивантажити інтеграцію (прибрати платформи та координатор)."""
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unload_ok:
+        hass.data.get(DOMAIN, {}).pop(entry.entry_id, None)
+    return unload_ok
