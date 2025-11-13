@@ -5,8 +5,6 @@ import logging
 from datetime import datetime, timedelta, date, time
 from typing import Any, Optional, Callable
 
-import aiohttp
-
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_track_point_in_utc_time
@@ -28,6 +26,9 @@ TZ_KYIV = dt_util.get_time_zone("Europe/Kyiv")
 
 # Спільний кеш: скільки секунд перевикористовуємо JSON, щоби уникнути дублів на старті
 MIN_REUSE_SECONDS = 120
+
+# Блок оновлень навколо опівночі (за Києвом)
+MIDNIGHT_BLOCK_MINUTES = 5  # 00:00–00:04
 
 
 class SvitloCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -80,18 +81,38 @@ class SvitloCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     and last_json_utc is not None
                     and (dt_util.utcnow() - last_json_utc).total_seconds() < MIN_REUSE_SECONDS
                 )
+
                 if not should_reuse:
-                    try:
-                        session = async_get_clientsession(self.hass)
-                        async with session.get(API_URL, timeout=30) as resp:
-                            if resp.status != 200:
-                                raise UpdateFailed(f"HTTP {resp.status} for {API_URL}")
-                            last_json = await resp.json(content_type=None)
-                            shared["last_json"] = last_json
-                            shared["last_json_utc"] = dt_util.utcnow()
-                            _LOGGER.debug("Fetched API once for all entries (%s)", API_URL)
-                    except Exception as e:
-                        raise UpdateFailed(f"Network error: {e}") from e
+                    # -------- MIDNIGHT GUARD: 00:00–00:04 Europe/Kyiv --------
+                    now_kyiv = dt_util.now(TZ_KYIV)
+                    if now_kyiv.hour == 0 and now_kyiv.minute < MIDNIGHT_BLOCK_MINUTES:
+                        if last_json is None:
+                            # Старт рівно опівночі без кешу – взагалі не ліземо в API
+                            raise UpdateFailed(
+                                "Midnight guard active (00:00–00:04 Europe/Kyiv) "
+                                "and no cached data available yet"
+                            )
+
+                        _LOGGER.debug(
+                            "Midnight guard: 00:00–00:%02d Europe/Kyiv, "
+                            "reusing cached JSON from %s without new API call",
+                            MIDNIGHT_BLOCK_MINUTES - 1,
+                            last_json_utc,
+                        )
+                        # Просто використовуємо last_json, не роблячи новий запит
+                    else:
+                        # -------- Звичайний фетч --------
+                        try:
+                            session = async_get_clientsession(self.hass)
+                            async with session.get(API_URL, timeout=30) as resp:
+                                if resp.status != 200:
+                                    raise UpdateFailed(f"HTTP {resp.status} for {API_URL}")
+                                last_json = await resp.json(content_type=None)
+                                shared["last_json"] = last_json
+                                shared["last_json_utc"] = dt_util.utcnow()
+                                _LOGGER.debug("Fetched API once for all entries (%s)", API_URL)
+                        except Exception as e:
+                            raise UpdateFailed(f"Network error: {e}") from e
 
         # 2) Побудова payload
         try:
@@ -119,7 +140,7 @@ class SvitloCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         slots_today_map: dict[str, int] = schedule.get(date_today) or {}
         slots_tomorrow_map: dict[str, int] = schedule.get(date_tomorrow) or {}
 
-        # >>> НОВА ЛОГІКА nosched:
+        # >>> ЛОГІКА nosched (нема розкладу на сьогодні)
         has_any_slots = any(v in (1, 2) for v in slots_today_map.values())
         if not has_any_slots:
             base_day = (
@@ -142,7 +163,7 @@ class SvitloCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 data_nosched["tomorrow_date"] = date_tomorrow
                 data_nosched["tomorrow_48half"] = []
             return data_nosched
-        # <<< КІНЕЦЬ НОВОЇ ЛОГІКИ
+        # <<< КІНЕЦЬ nosched
 
         def build_half_list(slots_map: dict[str, int]) -> list[str]:
             res: list[str] = []
