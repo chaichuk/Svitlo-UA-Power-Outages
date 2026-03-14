@@ -196,12 +196,6 @@ action:
           {{ r[k]['events'] | sort(attribute='start') }}
         {% else %}[]{% endif %}
 
-      # FIX #2: Для підпису беремо події сьогодні + завтра (фіксований період)
-      # Це запобігає зміні підпису коли подія завершується протягом дня
-      # Додаємо дату до підпису для створення "референсного стану" на початок доби:
-      # - Перший запуск після 00:xx (о 01:00+) → тільки оновлює helper, БЕЗ сповіщення
-      # - Це створює стабільний референс для порівняння протягом дня
-      # - Наступні оновлення порівнюються з цим référence
       events_for_signature: >-
         {%- set today = now().astimezone(now().tzinfo).date() -%}
         {%- set tomorrow = (now().astimezone(now().tzinfo) + timedelta(days=1)).date() -%}
@@ -215,8 +209,6 @@ action:
         {%- endfor -%}
         {{ ns.events }}
 
-      # Підпис для подій сьогодні + завтра (незалежно від поточного часу)
-      # Додаємо поточну дату для відстеження першого запуску після опівночі
       schedule_signature: >-
         {%- set date_prefix = now().strftime('%Y%m%d') -%}
         {%- set ns = namespace(sig='') -%}
@@ -227,21 +219,10 @@ action:
         {%- endfor -%}
         {{ date_prefix ~ "|c=" ~ (events_for_signature|count|string) ~ ";" ~ ns.sig }}
 
-      # Отримуємо старий запис з helper'а
       stored_data: "{{ states(storage_helper) | default('') }}"
-
-      # Перевіряємо, чи була активна аварія минулого разу (шукаємо префікс !E!)
       last_was_emergency: "{{ '!E!' in stored_data[:3] }}"
-
-      # Отримуємо чистий підпис графіка (видаляємо префікс аварії, якщо він є)
       old_signature: "{{ stored_data | replace('!E!', '') }}"
 
-      # Міграція старого формату: підтримуємо як старий формат (c=...) так і новий (20260215|c=...)
-      # При першому запуску з новою версією, helper автоматично оновиться до нового формату
-
-      # Перевіряємо чи це перший запуск після опівночі
-      # Якщо дата в helper старіша за сьогодні - це перший запуск, тільки оновлюємо референс
-      # Підтримка старого формату (без дати): якщо починається з "c=" - це старі дані
       current_date: "{{ now().strftime('%Y%m%d') }}"
       old_date: >-
         {%- if old_signature|length >= 2 and old_signature[:2] == 'c=' -%}
@@ -253,13 +234,8 @@ action:
         {%- endif -%}
       is_first_run_after_midnight: "{{ old_signature|length >= 8 and (old_signature|length < 2 or old_signature[:2] != 'c=') and (old_date|int(0)) < (current_date|int(0)) }}"
 
-      # ЛОГІКА ЗМІН (Anti-Spam)
-      # 1. Аварія змінилась ТІЛЬКИ якщо поточний статус не співпадає з записаним у хелпері.
       emergency_status_changed: "{{ is_emergency != last_was_emergency }}"
 
-      # 2. Графік змінився, якщо новий підпис не співпадає зі старим
-      # АЛЕ якщо це перший запуск після midnight - не вважаємо це зміною
-      # Для порівняння витягуємо чисті підписи (без префікса дати)
       clean_old_signature: >-
         {%- if '|' in old_signature -%}
           {{ old_signature.split('|')[1] }}
@@ -277,7 +253,6 @@ action:
            ((send_on_first_run and stored_data == '') or 
             clean_new_signature[-250:] != clean_old_signature[-250:]) }}
 
-      # Загальна перевірка: чи треба щось слати?
       should_notify: >-
         {{ (emergency_status_changed and notify_emergency_changes) or schedule_has_changed }}
 
@@ -309,16 +284,13 @@ action:
             {% endfor %}
             {{ ns.events }}
 
-          # Заголовок
           final_title: >-
-            {# Якщо статус аварії реально змінився #}
             {% if emergency_status_changed and notify_emergency_changes %}
               {% if is_emergency %}
                 🚨 ЕКСТРЕНІ ВІДКЛЮЧЕННЯ!
               {% else %}
                 ✅ Екстрені відключення завершено
               {% endif %}
-            {# Стандартний випадок #}
             {% else %}
               {{ base_title }}
             {% endif %}
@@ -352,6 +324,7 @@ action:
             ❌ {{ s2.strftime('%H:%M') }} ━ {{ e2.strftime('%H:%M') }}
             {%- endfor %}
             {%- endif %}
+
           body_text: |-
             {%- if show_location and location_name %}
             📍 {{ location_name }}
@@ -401,7 +374,6 @@ action:
                   color: "{{ '#FF0000' if is_emergency else '' }}"
 
       # 2.2) Telegram
-      # FIX #1: Правильна робота з thread_id - використовуємо choose для передачі параметра лише коли потрібно
       - if:
           - condition: template
             value_template: "{{ telegram_chat_id != '' }}"
@@ -415,7 +387,7 @@ action:
                   - service: telegram_bot.send_message
                     data:
                       config_entry_id: "{{ telegram_config_entry_id }}"
-                      target: >-
+                      chat_id: >-
                         {% if telegram_chat_id is string %}
                           {{ telegram_chat_id.split(',') | map('trim') | list }}
                         {% else %}
@@ -425,7 +397,7 @@ action:
                       message: "{{ body_text }}"
                       parse_mode: html
                       message_thread_id: "{{ telegram_message_thread_id | int }}"
-              
+
               # Новий unified bot БЕЗ гілки
               - conditions:
                   - condition: template
@@ -434,7 +406,7 @@ action:
                   - service: telegram_bot.send_message
                     data:
                       config_entry_id: "{{ telegram_config_entry_id }}"
-                      target: >-
+                      chat_id: >-
                         {% if telegram_chat_id is string %}
                           {{ telegram_chat_id.split(',') | map('trim') | list }}
                         {% else %}
@@ -443,7 +415,7 @@ action:
                       title: "{{ final_title }}"
                       message: "{{ body_text }}"
                       parse_mode: html
-              
+
               # Старий bot З гілкою
               - conditions:
                   - condition: template
@@ -451,7 +423,7 @@ action:
                 sequence:
                   - service: telegram_bot.send_message
                     data:
-                      target: >-
+                      chat_id: >-
                         {% if telegram_chat_id is string %}
                           {{ telegram_chat_id.split(',') | map('trim') | list }}
                         {% else %}
@@ -461,12 +433,12 @@ action:
                       message: "{{ body_text }}"
                       parse_mode: html
                       message_thread_id: "{{ telegram_message_thread_id | int }}"
-            
+
             # Старий bot БЕЗ гілки (default)
             default:
               - service: telegram_bot.send_message
                 data:
-                  target: >-
+                  chat_id: >-
                     {% if telegram_chat_id is string %}
                       {{ telegram_chat_id.split(',') | map('trim') | list }}
                     {% else %}
@@ -499,8 +471,6 @@ action:
               value: "{{ body_text[:255] }}"
 
   # 4) ЗБЕРІГАЄМО СТАН (Аварія + Графік)
-  # Ми пишемо в helper ЗАВЖДИ, щоб знати, чи ми в аварії.
-  # Якщо аварія - додаємо префікс !E!
   - service: input_text.set_value
     target:
       entity_id: !input storage_helper
