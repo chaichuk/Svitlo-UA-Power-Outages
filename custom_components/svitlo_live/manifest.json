@@ -1,7 +1,7 @@
 {
   "domain": "svitlo_live",
   "name": "Svitlo.live Schedules",
-  "version": "2.9.2",
+  "version": "2.9.3",
   "documentation": "https://github.com/chaichuk/svitlo_live",
   "issue_tracker": "https://github.com/chaichuk/svitlo_live/issues",
   "dependencies": [],
